@@ -10,37 +10,102 @@ dInner_px = NaN(n,1);
 dOuter_px = NaN(n,1);
 confidence = NaN(n,1);
 
-% Use template radius as outer radius
-load("vlp_template.mat","template")
-particleRadiusPx = round(template.rOuterMean);
+angles = linspace(0, 2*pi, 60);   % many angles for radial averaging
 
 for i = 1:n
 
     x0 = round(candidates(i,1));
     y0 = round(candidates(i,2));
+    rMax = round(candidates(i,4)/2);
 
-    rOuter = particleRadiusPx;
+    % -------- INNER (cross-section rotated max) --------
+    innerDiameters = [];
 
-    % Horizontal profile
-    xRange = max(1,x0-rOuter):min(W,x0+rOuter);
-    hProfile = I(y0, xRange);
+    rotAngles = linspace(0, pi, 18);
 
-    % Vertical profile
-    yRange = max(1,y0-rOuter):min(H,y0+rOuter);
-    vProfile = I(yRange, x0)';
+    for a = rotAngles
 
-    % Smooth
-    hProfile = smoothdata(hProfile,'gaussian',5);
-    vProfile = smoothdata(vProfile,'gaussian',5);
+        xLine = round(x0 + (-rMax:rMax) * cos(a));
+        yLine = round(y0 + (-rMax:rMax) * sin(a));
 
-    dH = computeDiameter(hProfile);
-    dV = computeDiameter(vProfile);
+        valid = xLine>=1 & xLine<=W & yLine>=1 & yLine<=H;
+        xLine = xLine(valid);
+        yLine = yLine(valid);
 
-    if ~isnan(dH) && ~isnan(dV)
-        dInner_px(i) = mean([dH dV]);
-        dOuter_px(i) = 2*rOuter;
-        confidence(i) = 1/(std([dH dV])+eps);
+        if numel(xLine) < 30
+            continue
+        end
+
+        profile = I(sub2ind(size(I), yLine, xLine));
+        profile = smoothdata(profile,'gaussian',5);
+
+        grad = gradient(profile);
+
+      [~, idxNeg] = min(grad);
+
+% Find positive gradient indices after idxNeg
+posCandidates = find(grad > 0);
+posCandidates = posCandidates(posCandidates > idxNeg);
+
+if isempty(posCandidates)
+    continue
+end
+
+% Choose strongest positive gradient after idxNeg
+[~, relIdx] = max(grad(posCandidates));
+idxPos = posCandidates(relIdx);
+        innerDiameters(end+1) = abs(idxPos - idxNeg); %#ok<AGROW>
     end
+
+    if isempty(innerDiameters)
+        continue
+    end
+
+    dInner_px(i) = max(innerDiameters);
+
+% -------- OUTER (local radial refinement) --------
+
+r0 = round(candidates(i,4)/2);  % template-based radius
+
+radii = (r0-10):(r0+10);
+radii = radii(radii > 5);  % avoid too small radii
+
+radialProfile = zeros(size(radii));
+
+for idxR = 1:length(radii)
+    r = radii(idxR);
+    intensitySum = 0;
+    count = 0;
+
+    for a = linspace(0,2*pi,60)
+        x = round(x0 + r*cos(a));
+        y = round(y0 + r*sin(a));
+
+        if x>=1 && x<=W && y>=1 && y<=H
+            intensitySum = intensitySum + I(y,x);
+            count = count + 1;
+        end
+    end
+
+    if count > 0
+        radialProfile(idxR) = intensitySum / count;
+    else
+        radialProfile(idxR) = NaN;
+    end
+end
+
+radialProfile = smoothdata(radialProfile,'gaussian',3);
+
+gradR = gradient(radialProfile);
+
+[~, idxBest] = min(gradR);  % strongest outward drop
+
+rRefined = radii(idxBest);
+
+dOuter_px(i) = 2*rRefined;
+
+    confidence(i) = 1/(std(innerDiameters)+eps);
+
 end
 
 dInner_nm = dInner_px * nm_per_px;
@@ -56,31 +121,5 @@ T = table( ...
         'dInner_px','dInner_nm', ...
         'dOuter_px','dOuter_nm', ...
         'confidence'});
-end
-
-
-function diameter = computeDiameter(profile)
-
-grad = gradient(profile);
-
-% Find strongest negative gradient (entering dark core)
-[~, idxNeg] = min(grad);
-
-% Find positive gradients AFTER idxNeg
-posCandidates = find(grad > 0);
-
-posCandidates = posCandidates(posCandidates > idxNeg);
-
-if isempty(posCandidates)
-    diameter = NaN;
-    return
-end
-
-% Among those, find the strongest positive gradient
-[~, maxIdx] = max(grad(posCandidates));
-
-idxPos = posCandidates(maxIdx);
-
-diameter = abs(idxPos - idxNeg);
 
 end
